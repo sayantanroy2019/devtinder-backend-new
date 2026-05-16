@@ -65,11 +65,12 @@ app.delete("/user",async (req,res) => {
 //find by id and update the data of the user
 app.patch("/user",async (req,res) => {
     try {
-        const user = await User.findByIdAndUpdate(req.body.userId,req.body);
+        const user = await User.findByIdAndUpdate(req.body.userId,req.body,{runValidators:true});
         if(!user){
             return res.status(400).send("User not found");
         }
         res.send("User updated successfully");
+        
     } catch (error) {
         res.status(500).send("Internal server error");
     }
