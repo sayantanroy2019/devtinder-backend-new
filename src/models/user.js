@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const validator = require('validator');
+const jwt = require('jsonwebtoken');
 
 const userSchema = new mongoose.Schema(
     {
@@ -11,6 +12,7 @@ const userSchema = new mongoose.Schema(
         },
         lastName: {
             type: String,
+            required: true,
             minlength: 3,
             maxlength: 20
         },
@@ -33,12 +35,12 @@ const userSchema = new mongoose.Schema(
         },
          age: {
             type: Number,
-            required: true,
+            
             min: 18
         },
         gender: {
             type: String,
-            required: true,
+            
             validate(value){
                if(!["male","female","others"].includes(value)){
                 throw new Error("Gender data is not valid");
@@ -62,6 +64,10 @@ const userSchema = new mongoose.Schema(
         timestamps: true
     }   
 );
+
+userSchema.methods.getJWTToken = function(){
+    return jwt.sign({userId:this._id},process.env.JWT_SECRET);
+};
 
 const User = mongoose.model('User', userSchema);
 
