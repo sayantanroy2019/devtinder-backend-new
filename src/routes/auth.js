@@ -15,14 +15,19 @@ authRouter.post("/signup", async (req, res) => {
 
 
         //Encrypt the password
-        const {firstName,lastName,email,password} = req.body;
+        const {firstName,lastName,email,password,age,gender,photoUrl,about,skills} = req.body;
         const hashedPassword = await bcrypt.hash(password,10);
 
       const user = new User({
         firstName,
         lastName,
         email,
-        password:hashedPassword 
+        password:hashedPassword,
+        age,
+        gender,
+        photoUrl,
+        about,
+        skills
       });
 
 
@@ -63,6 +68,18 @@ authRouter.post("/login", async (req,res) => {
 
     }catch (error) {
         res.status(400).send("LOGIN ERROR: "+ error.message);
+    }
+});
+
+authRouter.post("/logout", async (req,res) => {
+    try {
+
+        //expire the token
+        res.cookie("token","",{expires:new Date(Date.now())});
+        res.send("Logout successful");
+
+    } catch (error) {
+        res.status(400).send("LOGOUT ERROR: "+ error.message);
     }
 });
 

@@ -213,7 +213,163 @@ so now lets improve the sign up api
 
     but to make the code cleaner, and to follow the separation of concerns, we separate the routers into a different folder and file
 
-    
-  
 
+    CONNECTION REQUEST APIs - WHY A SEPARATE SCHEMA
+    now let's create the connection request APIs
+    before writing the APIs, we have to think about where to store the connection requests
+    one option is to store the connection requests inside the user model itself
+    but if we store the connection requests in the user model, it will add a lot of complexities
+    because the connection requests will have many corner cases and edge cases
+
+    for example -
+      a connection request may be in a hanging state (no response yet)
+      someone may be interested
+      someone may be ignored
+      someone may be rejected
+      someone may be accepted
+      and so on
+
+    so there can be many cases to handle - corner cases and edge cases
+    to handle all these cases cleanly, we have to create a separate model for storing the connection requests
+
+    this is the core idea -
+    whenever we use / define a schema, the schema is meant to define something
+    for example, the user schema defines the user
+    in the same way, we have to create another schema for connection requests
+    because this new schema will define the nature of the connection request -
+      who sent it
+      to whom it was sent
+      whether it is in an interested, ignored, accepted, or rejected state
+      and any other state the request may be in
+
+    that is why we have to create a new schema for the connection requests
+    keeping it in its own model keeps the user model clean and the connection-request logic isolated and easy to extend later
+
+    HOW TO BUILD THE SEND CONNECTION REQUEST API
+    few things to remember while writing this API -
+
+    the connection request needs three main pieces of data -
+      fromUserId  -> the user who is sending the request
+      toUserId    -> the user who is receiving the request
+      status      -> interested or ignored
+
+    where do these values come from?
+      fromUserId -> from the logged in user
+                    because the user is authenticated using the userAuth middleware,
+                    req.user is already available, so we just take req.user._id
+                    we never trust the client to tell us who they are
+      toUserId   -> from req.params (it comes in the URL, eg - /request/send/interested/:userId)
+      status     -> from req.params also (eg - /request/send/:status/:userId)
+
+    once we have all three values, we club them together into one object
+    and then we pass that object into the ConnectionRequest model to create a new document
+    after saving it to the DB, we send it back in the API response so the client can see what was created
+
+    example flow -
+      1. user A logs in -> gets a JWT cookie
+      2. user A hits POST /request/send/interested/<userB_id>
+      3. userAuth middleware verifies the cookie and attaches the user to req.user
+      4. inside the route handler:
+           const fromUserId = req.user._id
+           const toUserId   = req.params.userId
+           const status     = req.params.status
+      5. create a new ConnectionRequest with these three fields and save it
+      6. respond with the saved document
+
+
+    VALIDATIONS WE NEED TO ADD TO THE SEND REQUEST API
+    if we build the send request API in the most basic way, it has many flaws because there are no validations
+    a real API needs to handle all these edge cases before we can call it a mature API
+
+    validation 1 - status value check
+      this API is only used to SEND a request, to tell the fact that "I am interested" or "I am ignoring"
+      this API cannot be used to accept or reject a request - that is a different API (review)
+      so the status value coming from req.params MUST be either "interested" or "ignored"
+      if it is "accepted" or "rejected" (or anything else), the API should not work
+      reject the request with an error before doing anything else
+
+    validation 2 - no duplicate connection requests
+      suppose person A sends a connection request to person B
+      then later person A sends another connection request to person B
+      this would create duplicate connection requests in the DB - we do not allow this
+      rule -> if a connection request is already sent from A to B, we cannot send another one
+              till the existing one is accepted or rejected
+
+    validation 3 - reverse pending request
+      another corner case is the reverse direction
+      suppose person B has already sent a pending connection request to person A
+      then person A should not be able to send a connection request to person B at the same time
+      the existing pending request from B to A should be reviewed first
+      rule -> if there is any existing request between A and B (in either direction), do not allow a new one
+
+    validation 4 - both users must exist in the DB
+      we need to check that both fromUserId and toUserId actually exist in the users collection
+      if the toUserId does not exist, it means the user is sending a connection request to a person
+      who is not present in the database - this should not happen
+      so do a DB check (eg - User.findById(toUserId)) and throw an error if not found
+
+    validation 5 - cannot send a request to yourself
+      we have to make sure fromUserId and toUserId are different
+      if they are the same, that means the same person is sending a request to themselves - not allowed
+      add this check before saving the document
+
+
+    INDEXING THE CONNECTION REQUEST COLLECTION
+    once all the validations are added, the API is now a mature API
+    but the next problem is performance / scale
+
+    imagine -
+      there are 1000 users
+      each user sends connection requests to 100 different people
+      that means the connection requests collection will have around 100,000 documents
+      and this number only grows as the platform gets bigger
+
+    every time we run our validation checks (eg - "does a request from A to B already exist?",
+    "does a request from B to A already exist?", "list all requests received by user X"),
+    MongoDB has to scan through these documents to find the matching ones
+    without indexes, this is a full collection scan - very expensive at scale
+
+    the fix is to add indexes on the fields we query the most
+    for the connection request schema, the obvious candidates are -
+      fromUserId
+      toUserId
+      a compound index on { fromUserId, toUserId } for the duplicate-check queries
+
+    indexes make reads much faster (at the cost of slightly slower writes and a bit of extra storage)
+    for a query-heavy collection like this, it is absolutely worth it
+
+    rule of thumb -> any field you query, filter, or sort on frequently should be indexed
+
+
+    HOW INDEXING WORKS AND WHEN TO USE IT
+    to make query searching fast, we have to mark a field as an index
+    once we define a field as an index, the database will wind itself up around that index
+    internally, MongoDB builds a sorted data structure (a B-tree) for that field
+    so when we search by that field, it does not scan every document - it jumps straight to the matching one
+
+    example - in our user schema, email ID is a perfect candidate for indexing
+      because email is unique
+      and we do many searches by email (login, signup duplicate check, password reset, etc)
+      that is why email should be indexed
+      (note - declaring `unique: true` on a field also creates a unique index under the hood,
+       so in our case the email field is already indexed)
+
+    the core logic behind indexing -
+      whatever field you are finding or searching by frequently, that field is the one you should index
+      with the index in place, the search becomes much faster
+
+    BUT - do not just index every field
+    indexing comes with costs -
+      every index takes up extra disk space
+      every write (insert / update / delete) has to update all the indexes too,
+        so writes get slower as you add more indexes
+      indexes also use RAM - MongoDB tries to keep them in memory for speed
+
+    so unnecessary indexing actually slows down the system overall
+    index only where it is genuinely required -
+      fields used in WHERE / find filters frequently
+      fields used in sort
+      fields used in joins / lookups
+
+    rule - index where you read by it a lot, NOT just because the field exists
 

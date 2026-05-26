@@ -13,6 +13,14 @@ const validatesignupdata = (data) => {
     }
 }
 
-module.exports = {
-    validatesignupdata
-}
+const validateEditProfileData = (req) => {
+    isAllowedToUpdate = ["firstName","lastName","email","age","gender","photoUrl","about","skills"];
+        Object.keys(req.body).forEach(key => {
+            if(!isAllowedToUpdate.includes(key)){
+                return false;
+            }
+        });
+        return true;
+};
+
+module.exports = { validatesignupdata, validateEditProfileData };
