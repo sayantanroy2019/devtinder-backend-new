@@ -373,3 +373,261 @@ so now lets improve the sign up api
 
     rule - index where you read by it a lot, NOT just because the field exists
 
+
+    REQUEST REVIEW API - PLANNING BEFORE WRITING CODE
+    before writing any API, we should first write down the important steps and corner cases
+    if we plan ahead, when we actually sit down to write the code it becomes very clear
+    what needs to go where, and we miss fewer edge cases
+
+    the request review API is what the RECEIVER of a connection request uses to accept or reject it
+    route - POST /request/review/:status/:requestId
+      :status     -> accepted or rejected
+      :requestId  -> the _id of the ConnectionRequest document being reviewed
+
+    inputs we already have once userAuth runs -
+      req.user._id          -> the logged in user (must be the receiver)
+      req.params.status     -> accepted or rejected
+      req.params.requestId  -> the connection request _id
+
+    validations / corner cases to handle (in order)
+
+    validation 1 - status value check
+      this API can ONLY change status to "accepted" or "rejected"
+      it CANNOT be used to set status to "interested" or "ignored" - that is the send API's job
+      so the value coming from req.params.status must be either "accepted" or "rejected"
+      anything else -> reject the request
+
+    validation 2 - request ID must exist in the DB
+      the requestId coming from the URL must point to an actual ConnectionRequest document
+      do a findOne / findById on ConnectionRequest using that requestId
+      if no document is found -> throw an error (the request does not exist)
+
+    validation 3 - the logged in user must be the toUserId
+      we are reviewing a request, meaning the logged in user is the RECEIVER of that request
+      so on the matched ConnectionRequest document, the toUserId field must equal req.user._id
+      if the logged in user is the sender (fromUserId) and tries to accept their own outgoing request,
+        that should not be allowed - they cannot review their own sent request
+      so the rule is - only the toUserId of the connection request can review it
+
+    validation 4 - the current status must be "interested"
+      only requests in the "interested" state can be moved to "accepted" or "rejected"
+      if the request is already "accepted", "rejected", or "ignored", we cannot touch it again
+      this prevents weird transitions like rejected -> accepted, or accepting an already-accepted request
+
+    once all four checks pass -
+      update the status of the connection request to the new value
+      save the document
+      respond with the updated document
+
+    we can also clean this up using a single MongoDB query that combines validations 2, 3, and 4 -
+      ConnectionRequest.findOne({
+        _id: requestId,
+        toUserId: req.user._id,
+        status: "interested",
+      })
+    if this returns null, we know one of the three conditions failed, and we can throw a generic error
+    (this is also slightly more secure - we do not tell the attacker exactly which check failed)
+
+
+    THOUGHT PROCESS - POST API vs GET API
+    one important thing to remember -
+    the thought process of creating a POST API is very different from creating a GET API
+    whenever you are creating any API, look at it through the lens of "is this a POST or a GET?"
+    because the security concerns on each side are completely different
+
+    think of yourself as the SECURITY GUARD of the database
+    once you take that mindset, the moment you see an incoming request,
+    you will automatically know what to check based on the API type
+
+    for a POST API (data coming IN)
+      the user is sending data into your database
+      a malicious user can try to put random / malformed / dangerous data into the DB
+      so you have to -
+        check every single field coming from the request
+        validate types, formats, and allowed values
+        sanitize anything that goes into the DB
+        never trust req.body or req.params blindly
+      goal -> protect the DATABASE from bad data going IN
+
+    for a GET API (data going OUT)
+      the user is asking your server to send data back
+      a malicious user is trying to extract sensitive or unauthorized information OUT of the DB
+      so you have to -
+        decide what fields are SAFE to send back
+        explicitly exclude private fields (password hash, JWT secrets, internal flags, etc)
+        check whether the requesting user has the AUTHORIZATION to see that data at all
+        return only the allowed fields, nothing more
+      goal -> protect the DATABASE from leaking data going OUT
+
+    short version -
+      POST -> validate what's coming IN
+      GET  -> filter what's going OUT
+
+    if you keep this mental model, every API you write becomes more secure by default
+    because you are reasoning about the threat model, not just the happy path
+
+
+    LINKING COLLECTIONS WITH ref AND populate (USED IN REQUEST RECEIVED API)
+    in MongoDB (via Mongoose) we can link two collections together using `ref` inside a schema field
+    once two collections are linked, we can pull / populate data from the other collection
+    using a single query - we do not need to make two separate DB calls
+
+    how the linking works
+      in the connection request schema, fromUserId and toUserId are of type ObjectId
+      we tell mongoose that these ObjectIds actually point to documents in the User collection
+      by adding `ref: "User"` to the field definition
+
+      fromUserId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",            <- this is the link
+        required: true,
+      }
+
+      now mongoose knows -> "the value stored here is the _id of a document in the User collection"
+
+    how populate uses that link
+      when we query the ConnectionRequest collection, the fromUserId field is just an ObjectId by default
+      that ObjectId is not useful to the frontend - it does not tell us the user's name or photo
+      so we use .populate() to swap that ObjectId for the actual user document
+
+      ConnectionRequest.find({ toUserId: loggedInUserId, status: "interested" })
+        .populate("fromUserId", "firstName lastName photoUrl about skills")
+
+      the second argument to populate is the list of fields we want from the User document
+      (always pick only the safe / useful fields - never populate the entire user doc,
+       because that would leak the password hash and other sensitive fields - remember the GET API rule)
+
+    why this matters for the request RECEIVED API
+      the request received API has to return the list of connection requests
+      where the logged in user is the toUserId AND the status is "interested"
+      but the frontend cannot do anything useful with just an ObjectId in fromUserId
+      it wants to show -> "John Doe wants to connect with you" with John's photo
+      that is exactly what populate gives us
+
+    short version -
+      ref       -> defines the link between two collections at the schema level
+      populate  -> uses that link at query time to pull data from the other collection
+      together  -> single query, joined data, clean API response
+
+    this is the MongoDB / Mongoose equivalent of a SQL JOIN, just done at the application layer
+    important - always restrict what fields you populate, never blindly populate the whole document
+
+
+    REMEMBER - ref AND populate
+    these two are very important concepts to remember -
+      ref       -> declares the link between two collections at the schema level
+      populate  -> uses that link at query time to fetch the linked document's data
+
+    almost every real-world API in this project (and in any social / relational backend) will need them -
+      showing requests received with the sender's name and photo
+      showing your list of connections with their profile info
+      showing a feed of users with their details
+      any time one document references another - you will use ref + populate
+
+    so internalize these two -> they are the backbone of how Mongoose handles relationships
+
+
+    FEED API - WHAT TO SHOW AND WHAT TO HIDE
+    the feed API is the most important user-facing API
+    when a user opens the app, the feed is what they see -
+    a list of "cards" of other users they can swipe interested / ignored on
+
+    the thinking behind the feed -
+    any user should be able to see ALL other users on the platform, EXCEPT for the following -
+
+    exclusion 1 - the logged in user himself
+      the feed should never show your own card to yourself
+      so exclude req.user._id from the result set
+
+    exclusion 2 - the logged in user's existing connections
+      people you are already connected to (status: accepted) should not appear in the feed
+      no point showing someone you have already matched with
+
+    exclusion 3 - the people the logged in user has ignored
+      if you swiped ignored on someone, you should not see them again
+      they are already in a ConnectionRequest doc with status: "ignored"
+
+    exclusion 4 - the people the logged in user has sent any request to
+      if you have already sent an "interested" or "ignored" request to someone,
+      they should not show up in your feed again until that request is resolved
+
+    exclusion 5 - the people the logged in user has received any request from
+      if someone has already sent you a request, they should appear in your "requests received" list,
+      not in the open feed - so exclude them from the feed too
+
+    short version -
+      hide ANY user that has any existing ConnectionRequest with you (in either direction)
+      hide yourself
+      show everyone else
+
+    how to build the query (the approach)
+      step 1 - fetch all ConnectionRequest docs where the logged in user is fromUserId OR toUserId
+               (these are all the people you already have any kind of interaction with)
+      step 2 - from these docs, collect all the OTHER userIds involved
+               (the userId that is NOT yours, for each connection request)
+      step 3 - put them all in a Set (to dedupe) - call it hiddenUsersFromFeed
+      step 4 - also add the logged in user's own _id to that set
+      step 5 - query the User collection -
+                User.find({ _id: { $nin: Array.from(hiddenUsersFromFeed) } })
+                ($nin = "not in" - excludes all the userIds in the hidden set)
+      step 6 - return only safe profile fields (firstName, lastName, photoUrl, age, gender, about, skills)
+               remember the GET API rule - filter what goes OUT, never leak password / email
+
+    pagination is also important here (for later)
+      a feed can have thousands of users - we should not send all of them at once
+      accept ?page=1&limit=10 as query params and use .skip() / .limit() in the query
+      this keeps the API fast and the response small
+
+
+    FEED API - IMPLEMENTATION APPROACH (RECAP)
+    putting it all together, the steps we are going to take in the feed API are -
+      step 1 - find ALL the connection requests where -
+                 fromUserId is the logged in user, OR
+                 toUserId is the logged in user
+               this gives us every user the logged in user has any kind of interaction with
+      step 2 - from those connection requests, collect the OTHER userIds (not yours)
+               and put them all in a Set - we will call it "hideUsersFromFeed"
+               (Set is used so duplicates are automatically removed)
+      step 3 - now we know exactly which users to HIDE from the feed
+      step 4 - query the User collection and display ALL users EXCEPT the ones in hideUsersFromFeed
+               (also exclude your own _id so you do not see yourself)
+
+
+    PAGINATION ON THE FEED API
+    once the feed is working, the next thing to add is pagination
+    because in production we will have thousands of users -
+    sending all of them in one response would be slow and waste bandwidth
+
+    pagination uses two query parameters -
+      limit  -> the number of users to return in one page (eg - 10 users per page)
+      page   -> which page the user is asking for (eg - page 1, page 2, page 3, ...)
+
+    how page and limit work together -
+      if limit = 10 and page = 1  -> skip 0 users, return the next 10  (users 1 - 10)
+      if limit = 10 and page = 2  -> skip 10 users, return the next 10 (users 11 - 20)
+      if limit = 10 and page = 3  -> skip 20 users, return the next 10 (users 21 - 30)
+      formula -> skip = (page - 1) * limit
+
+    in MongoDB / Mongoose, two important functions handle this -
+      .skip(n)   -> skip the first n documents in the result
+      .limit(n)  -> return only the next n documents after the skip
+
+    example -
+      const page  = parseInt(req.query.page)  || 1;
+      const limit = parseInt(req.query.limit) || 10;
+      const skip  = (page - 1) * limit;
+
+      const feed = await User.find({ _id: { $nin: hiddenUsersArray } })
+        .select("firstName lastName photoUrl age gender about skills")
+        .skip(skip)
+        .limit(limit);
+
+    important - always cap the limit on the server side (eg - max 50)
+      because a malicious user could send ?limit=1000000 and try to dump the whole DB
+      (remember the GET API security guard rule - filter what goes out)
+
+    short version -
+      .skip()  + .limit() = pagination
+      page tells you WHICH chunk, limit tells you HOW BIG the chunk is
+      always sanity-check the values coming from req.query
+
