@@ -61,7 +61,7 @@ authRouter.post("/login", async (req,res) => {
 
             //send the token to the user in a cookie
             res.cookie("token",token,{httpOnly:true,secure:true,maxAge:30*24*60*60*1000});
-            res.send("Login successful");
+            res.send(user);
 
         }
         

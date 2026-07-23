@@ -631,3 +631,52 @@ so now lets improve the sign up api
       page tells you WHICH chunk, limit tells you HOW BIG the chunk is
       always sanity-check the values coming from req.query
 
+
+    CORS ERROR - WHAT IT IS AND HOW TO FIX IT
+    once we start connecting our frontend (eg - a React app) to this backend,
+    we will hit something called a CORS error
+    CORS stands for Cross-Origin Resource Sharing
+
+    what is "origin"?
+      an origin is basically the combination of protocol + domain + port
+      eg - http://localhost:3000 is one origin
+      eg - http://localhost:5173 (frontend) is a different origin
+
+    what is the CORS error?
+      it is a browser-enforced security feature
+      when a request is made from domain X to domain Y, and X and Y are DIFFERENT domains,
+      the browser does not allow it by default - it blocks the response and shows a CORS error
+
+      example -
+        request from abc.com -> abc.com   (same domain)        => no error, browser is happy
+        request from abc.com -> xyz.com   (different domain)   => CORS error, browser blocks it
+
+    why does the browser do this?
+      to protect users from malicious sites making unauthorized requests
+      to other sites on their behalf (using their cookies, tokens, etc)
+      it is a frontend-side security check - the backend never sees the request blocked
+
+    how to fix it on the backend
+      the backend has to explicitly tell the browser -
+      "yes, I allow this other origin to talk to me"
+      this is done via special CORS response headers (eg - Access-Control-Allow-Origin)
+
+      easiest way in Express -> install the cors npm package
+      step 1 -> npm install cors
+      step 2 -> require it and add it as a middleware
+
+      const cors = require("cors");
+      app.use(cors({
+        origin: "http://localhost:5173",   // the frontend origin
+        credentials: true,                 // allow cookies (needed because we use JWT in cookies)
+      }));
+
+      IMPORTANT - add this middleware as the FIRST middleware, ABOVE all other middlewares
+      because CORS headers have to be attached BEFORE express.json, cookieParser, routes etc
+      if you put it later, some requests (especially OPTIONS preflight) will not get the CORS headers
+
+    in production
+      do NOT use origin: "*" with credentials -> the browser will block it
+      always set a specific allowed origin (eg - https://yourapp.com)
+      or use a function/array if you want to allow multiple origins
+
